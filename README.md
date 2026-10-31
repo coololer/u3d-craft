@@ -131,11 +131,19 @@ cd Build/Output/WebGL && python -m http.server 8080
 
 详细内容放在 `Docs/` 下，这里只放索引：
 
-| 文档 | 内容 |
-|---|---|
-| `Docs/Baseline.md` | 三端出包耗时与包体基线 |
-| `Docs/Pitfalls.md` | 打包、适配、性能优化中的坑与解法 |
-| `Docs/Architecture.md` | 框架分层说明 |
+| 文档 | 内容 | 状态 |
+|---|---|---|
+| [`Docs/Baseline.md`](Docs/Baseline.md) | 三端出包耗时与包体基线，含 IL2CPP / Mono 对比数据 | ✅ |
+| [`Docs/Pitfalls.md`](Docs/Pitfalls.md) | 打包、适配、性能优化中的坑与解法（含完整报错与排查过程） | ✅ |
+| `Docs/Architecture.md` | 框架分层说明 | ⏳ |
+
+### 已记录的坑
+
+| 编号 | 问题 | 一句话结论 |
+|---|---|---|
+| [P-001](Docs/Pitfalls.md#p-001) | Unity 2021.3.14f1 打 APK 报 "licenses have not been accepted" | 内置 SDK 只有 build-tools 28.0.3 且无 licenses 目录，写入官方 license 哈希并补装 29.0.2 |
+| [P-002](Docs/Pitfalls.md#p-002) | 空包 11 MB 偏大？ | 83% 是引擎原生库，业务资源占比不足 1% |
+| [P-003](Docs/Pitfalls.md#p-003) | Mono 打包 20 MB，比 IL2CPP 还大 | Mono 回退到 32 位 armeabi-v7a + 全量携带 .NET 类库 |
 
 ---
 

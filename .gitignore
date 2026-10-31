@@ -1,12 +1,18 @@
-# 1. 加载 Unity 官方提供的标准模板规则
-## https://github.com/github/gitignore/blob/main/Unity.gitignore
-[Ll]ibrary/
-[Tt]emp/
-[Oo]bj/
-[Bb]uild/
-[Bb]uilds/
-[Ll]ogs/
-[Uu]ser[Ss]ettings/
+# ============================================================
+# u3d-craft .gitignore
+# 设计原则：忽略「产物」与「本地环境」，保留「源码」与「脚本」
+# 注意：使用前导斜杠 / 锚定到仓库根目录，避免误伤 Assets/ 下的同名目录
+# ============================================================
+
+# ---------- 1. Unity 官方标准模板 ----------
+# https://github.com/github/gitignore/blob/main/Unity.gitignore
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
 *.csproj
 *.unityproj
 *.sln
@@ -18,21 +24,60 @@
 *.booproj
 *.svd
 *.pdb
+*.mdb
 *.opendb
-*.db
-*.VC.db
 *.pidb.meta
 *.pdb.meta
 *.mdb.meta
 sysinfo.txt
-*.apk
-*.unitypackage
 crashlytics-build.properties
 DeployHistory
+/[Aa]ssets/[Ll]ibrary/
+/[Aa]ssets/[Tt]emp/
 
-# 2. 额外补充：确保以下常见 Unity 垃圾文件夹被彻底忽略
-Temp/
-Obj/
-Builds/
-Logs/
-UserSettings/
+# ---------- 2. 构建产物 ----------
+# 只忽略根目录下的产物目录，Build/ 里的脚本要提交
+/[Bb]uild/[Oo]utput/
+/[Bb]uilds/
+/[Dd]ist/
+*.apk
+*.aab
+*.unitypackage
+*.app
+*.ipa
+
+# ---------- 3. 密钥与凭据（最高优先级） ----------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.keystore
+*.jks
+secrets/
+local.settings.json
+
+# ---------- 4. IDE / 编辑器 ----------
+.vs/
+.vscode/
+.idea/
+*.csproj.user
+*.DotSettings.user
+*.VC.db
+*.VC.VC.opendb
+
+# ---------- 5. 系统与临时文件 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+/[Ll]ogs/
+crash-*.dmp
+
+# ---------- 6. 本地工具与缓存 ----------
+/[Tt]ools/[Ll]ocal/
+node_modules/
+/__pycache__/
+*.pyc
+.venv/

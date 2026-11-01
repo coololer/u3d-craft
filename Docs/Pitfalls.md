@@ -12,6 +12,7 @@
 - [P-002 包体分析：空包 11MB，引擎占 83%](#p-002)
 - [P-003 Mono 打包比 IL2CPP 还大](#p-003)
 - [P-004 Ollama 已下载模型但 API 返回空列表](#p-004)
+- [P-005 Ollama 推理报 CUDA error: device kernel image is invalid](#p-005)
 
 ---
 
@@ -266,6 +267,86 @@ curl http://127.0.0.1:11434/api/tags
 - 修改服务的环境变量后，**必须重启该服务**才生效——这一点对 Ollama、Docker、数据库等都成立。
 - Windows 上这类"后台服务 + 托盘应用"的双进程结构，是排查时的高频陷阱。
 - 验证顺序建议：先看文件 → 再看进程 → 再看端口 → 最后看 API，逐层排除。
+
+---
+
+<a id="p-005"></a>
+## P-005 Ollama 推理报 CUDA error: device kernel image is invalid
+
+**日期**：2026-11-01
+**环境**：Ollama 0.40.13 / RTX 3070 Ti Laptop 8 GB / NVIDIA 546.30 / Win10 24H2
+
+### 现象
+
+`ollama list` 能看到 `qwen2.5:7b`，`/api/tags` 也正常返回，但一经推理就返回 HTTP 500：
+
+```json
+{
+  "error": "llama-server process has terminated: exit status 0xc0000409:
+            The system detected an overrun of a stack-based buffer in this application.:
+            CUDA error\nCUDA error: device kernel image is invalid"
+}
+```
+
+`/api/version`、`/api/ps` 均正常返回 200，说明**服务本身健康，只有推理路径崩溃**。
+
+### 排查过程
+
+| 步骤 | 动作 | 结果 |
+|---|---|---|
+| 1 | `GET /api/version` | 200 `{"version":"0.40.13"}` — 服务活着 |
+| 2 | `GET /api/ps` | 200 `{"models":[]}` — 没有已加载模型 |
+| 3 | `POST /api/generate` | 500，抓到完整错误体 |
+| 4 | `POST /v1/chat/completions` | 同样 500，错误体一致 |
+| 5 | 看错误关键字 | **`device kernel image is invalid`** = GPU 内核二进制与驱动不匹配 |
+
+### 根因
+
+Ollama 0.40 版本内置的 CUDA 内核是按较新的 CUDA Toolkit 编译的，而本机驱动为 **546.30**（2024 年初）。驱动版本低于内核镜像的运行时要求，加载 GPU 核函数时校验失败，导致 llama-server 进程直接崩溃。
+
+> **推论依据**：错误发生在「加载/执行 GPU kernel」阶段而非「下载或读取模型」阶段，且换哪个 API 入口都崩，说明模型文件本身没问题，问题在 GPU 运行时栈。
+
+### 解决
+
+**方案 A：升级 NVIDIA 驱动（治本）**
+
+1. GeForce Experience 或官网下载最新 Game Ready Driver
+2. 显卡选 `RTX 3070 Ti Laptop GPU`
+3. 自定义安装 → 勾选**执行清洁安装**
+4. 重启
+
+升级后验证：
+
+```bash
+curl http://127.0.0.1:11434/api/ps
+ollama run qwen2.5:7b "你好"
+```
+
+**方案 B：临时改用 CPU 推理（立即可用，速度慢）**
+
+```powershell
+Get-Process ollama, "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force
+$env:CUDA_VISIBLE_DEVICES = "-1"
+$env:OLLAMA_MODELS = "E:\AI\ollama\models"
+Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden
+```
+
+- CPU 方案用 **API** 调用时，`test_api.py` 走的是 `/api/generate`，会单独开进程，通常不受影响；但 Ollama 服务端若启动时已启用 GPU，需要按上面的方式重启服务端。
+- 7B Q4 在 i7-12700H 上约 **3–6 tok/s**，能跑但体验差。
+
+### 当前状态
+
+**未解决（待升级驱动）**。已降级为「非阻塞项」：
+
+- AI 主力改用 DeepSeek 云端 API（已打通，0.78s 响应，成本约 ¥1/百万 token）
+- 本地模型作为 W11–W13 做 AI NPC 兜底时才需要，届时升级驱动
+
+### 复盘
+
+- **"能列出来"≠"能跑"**。`/api/tags`、`/api/ps` 只说明模型文件在，不说明 GPU 推理栈可用。必须实调一次才知道。
+- 错误信息里 `device kernel image is invalid` 是很明确的信号：**驱动与 CUDA 运行时不匹配**，不要误以为是模型损坏去重下模型。
+- 环境扫描结果（驱动偏旧）在第一天就出现过，当时判断为「建议升级」，事后证明它会实际阻塞。**"建议"和"阻塞"的界限，要动手验证才知道。**
+- 计划上这类问题的处理策略：**不阻塞主线**，主力方案切云端，本地路径降级为待办。
 
 ---
 

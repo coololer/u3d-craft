@@ -192,15 +192,25 @@ curl http://127.0.0.1:11434/api/tags
 - [ ] GitHub Actions CI 自动构建
 - [ ] HybridCLR 热更新接入
 - [ ] 微信小游戏首包裁剪到 4MB 以内（已定位主要体积来源，见 P-008）
+- [ ] WebGL 产物开启 brotli 压缩（当前 wasm 14.79 MB 未压缩，见 P-009）
 
 ### 三端交付进度
+
+**注意**：Unity Minigame 插件一次构建输出两个目录，用途不同，不可混淆：
+
+| 产物 | 用途 | 体积 | 部署目标 |
+|---|---|---|---|
+| `webgl/` | WebGL 页面 | 35.90 MB | ✅ 上传 **CDN** 静态托管 |
+| `minigame/` | 微信小游戏项目 | 8.83 MB | ⏳ 微信平台分发（**不上 CDN**） |
 
 | 平台 | 构建 | 部署 | 包体 | 备注 |
 |---|---|---|---|---|
 | Android (IL2CPP arm64) | ✅ | — | 11.04 MB | 需修复 SDK 许可证，见 P-001 |
 | Android (Mono armv7) | ✅ | — | 20.23 MB | 开发调试用，见 P-003 |
-| WebGL | ✅ | 本地 HTTP | 4.96 MB | 部署需注意 `.gz` 配置，见 P-006 |
-| **微信小游戏** | ✅ | ✅ **云端 CDN** | 8.83 MB → **4.40 MB** | 需排除调试符号，见 P-008 |
+| **WebGL**（`webgl/`） | ✅ | ✅ **CDN 静态托管** | 35.90 MB | 含 4.43 MB 符号 + 未压缩 wasm，见 P-008 / P-009 |
+| **微信小游戏**（`minigame/`） | ✅ | 微信开发者工具 | 8.83 MB → **4.40 MB** | 排除调试符号，见 P-008 |
+
+> 两个 web 产物体积差异大的原因：`webgl/` 的 `.wasm` **未压缩**（14.79 MB），而 `minigame/` 做了 brotli 预压缩（3.49 MB）。详见 [`Docs/Baseline.md`](Docs/Baseline.md)。
 
 ### 构建耗时（空工程实测）
 
@@ -216,7 +226,11 @@ curl http://127.0.0.1:11434/api/tags
 
 ## 微信小游戏部署（云开发）
 
-使用**微信云开发**的静态网站托管 + 云存储承载游戏资源，通过 CloudBase CLI 一条命令上传整目录。
+使用**微信云开发**的静态网站托管 + 云存储承载 **WebGL 页面**，通过 CloudBase CLI 一条命令上传整目录。
+
+> ⚠️ **上传的是 `webgl/` 目录，不是 `minigame/`**
+> - `webgl/` → 上传 CDN，用于浏览器 / WebView 访问
+> - `minigame/` → 用微信开发者工具「打开项目」直接运行，由微信平台分发，**不需要上传 CDN**
 
 ### 一次性准备
 
@@ -235,15 +249,31 @@ tcb login
 
 ### 上传前：排除调试符号
 
+两个目录都带 4.43 MB 符号文件，上传前统一移出：
+
 ```powershell
-$src = ".\minigame"
-$archive = ".\_symbols\$(Get-Date -Format yyyyMMdd)"
-New-Item -ItemType Directory -Path $archive -Force | Out-Null
-Get-ChildItem $src -Filter "*.symbols.unityweb" -Recurse |
-    Move-Item -Destination $archive -Force
+$symbols = ".\_symbols\$(Get-Date -Format yyyyMMdd)"
+New-Item -ItemType Directory -Path $symbols -Force | Out-Null
+
+# CDN 产物：webgl.symbols.json
+Get-ChildItem ".\webgl" -Filter "*.symbols.json" -Recurse |
+    Move-Item -Destination $symbols -Force
+
+# 微信产物：webgl.wasm.symbols.unityweb
+Get-ChildItem ".\minigame" -Filter "*.symbols.unityweb" -Recurse |
+    Move-Item -Destination $symbols -Force
 ```
 
-删掉 `webgl.wasm.symbols.unityweb` 可让体积 **8.83 MB → 4.40 MB（-50%）**。符号文件按版本归档，线上崩溃时用来还原栈。详见 [P-008](Docs/Pitfalls.md#p-008)。
+| 目录 | 原体积 | 排除后 |
+|---|---|---|
+| `webgl/` | 35.90 MB | **31.47 MB** |
+| `minigame/` | 8.83 MB | **4.40 MB** |
+
+符号文件按版本归档，线上崩溃时用来还原栈。详见 [P-008](Docs/Pitfalls.md#p-008)。
+
+### 进一步优化：开启压缩
+
+`webgl/` 的 `.wasm` 是 14.79 MB 原始二进制。开启 brotli 后约 **3.5 MB**（参照 `minigame/` 的 `.br` 效果，压比 76%）。方式见 [P-009](Docs/Pitfalls.md#p-009)。
 
 ### 一键上传
 
@@ -288,7 +318,8 @@ tcb hosting:delete webgl -e <环境ID>  # 删除云端目录
 | [P-005](Docs/Pitfalls.md#p-005) | Ollama 推理报 `device kernel image is invalid` | NVIDIA 546.30 驱动低于 Ollama 0.40 内核要求，需升级驱动 |
 | [P-006](Docs/Pitfalls.md#p-006) | WebGL 部署白屏 | 产物是 `.gz`，服务器须返回 `Content-Encoding: gzip`，或构建时开 Decompression Fallback |
 | [P-007](Docs/Pitfalls.md#p-007) | npm 全局装 tcb 失败 | PowerShell 执行策略 + 国内镜像：`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` + `--registry` 临时指定 |
-| [P-008](Docs/Pitfalls.md#p-008) | 微信小游戏体积翻倍 | `webgl.wasm.symbols.unityweb` 调试符号占 4.43 MB，上传前排除，体积 -50% |
+| [P-008](Docs/Pitfalls.md#p-008) | 调试符号被打包 | webgl/ 与 minigame/ 各带 4.43 MB 符号文件，上传前排除：CDN -12.3%、微信 -50% |
+| [P-009](Docs/Pitfalls.md#p-009) | CDN 上 wasm 未压缩 | webgl.wasm 14.79 MB 原样下发，开启 brotli 后约 3.5 MB（压比 76%） |
 
 ---
 

@@ -15,7 +15,8 @@
 - [P-005 Ollama 推理报 CUDA error: device kernel image is invalid](#p-005)
 - [P-006 WebGL 部署白屏：.gz 压缩与服务器 MIME 配置](#p-006)
 - [P-007 npm 全局安装 tcb 失败：PowerShell 执行策略与国内镜像](#p-007)
-- [P-008 微信小游戏体积翻倍：调试符号文件被打包](#p-008)
+- [P-008 调试符号文件被打包：webgl/ 与 minigame/ 各浪费 4.43 MB](#p-008)
+- [P-009 CDN 上的 WebGL 产物未压缩：14.79 MB 的 wasm 原样下载](#p-009)
 
 ---
 
@@ -516,71 +517,143 @@ tcb hosting deploy ./webgl webgl -e <环境ID>
 ---
 
 <a id="p-008"></a>
-## P-008 微信小游戏体积翻倍：调试符号文件被打包
+## P-008 调试符号文件被打包：`webgl/` 与 `minigame/` 各浪费 4.43 MB
 
 **日期**：2026-11-02
-**环境**：Unity 2021.3.14f1，Minigame 平台
+**环境**：Unity 2021.3.14f1，Minigame 插件，WebGL / 微信小游戏双产物
 
 ### 现象
 
-空工程构建微信小游戏，产物目录 **8.83 MB**。而同一工程的纯 WebGL 构建只有 **4.96 MB**，两者底层都是 wasm，体积不该差这么多。
+一次构建输出两个目录，两个都异常大：
+
+| 目录 | 用途 | 体积 |
+|---|---|---|
+| `webgl/` | 上传 CDN | **35.90 MB** |
+| `minigame/` | 微信开发者工具运行 | **8.83 MB** |
 
 ### 排查
 
-按顶级目录归类统计：
+**先分清两个目录**（这是最容易搞混的地方）：
 
-| 条目 | 体积 |
-|---|---|
-| `webgl.wasm.symbols.unityweb`（根目录） | **4.43 MB** |
-| `wasmcode/*.br` | 3.49 MB |
-| `unity-sdk/` | 0.37 MB |
-| 其他 | < 0.02 MB |
+| | `webgl/` | `minigame/` |
+|---|---|---|
+| 入口 | `index.html` | `game.js` + `game.json` |
+| 是否上 CDN | ✅ 是 | ❌ 否 |
+| 代码压缩 | ❌ 原始 `.wasm` | ✅ `.br`（brotli） |
 
-**根因**：`webgl.wasm.symbols.unityweb` 是 IL2CPP 构建生成的**调试符号表**，体积高达 4.43 MB，占整个产物的 50%。它只用于把崩溃栈地址还原成函数名，**运行时完全不需要**。
+两个目录里各有一个 **4.43 MB 的调试符号文件**：
 
-Unity 构建时把符号文件留在了输出目录里，如果按"整个目录上传"的方式部署，就会把这 4.43 MB 一起传上去。
+| 目录 | 符号文件 | 体积 |
+|---|---|---|
+| `webgl/` | `Build/webgl.symbols.json` | **4.43 MB** |
+| `minigame/` | `webgl.wasm.symbols.unityweb` | **4.43 MB** |
+
+**根因**：这是 IL2CPP 生成的**调试符号表**，只用于把崩溃栈地址还原成函数名，**运行时完全不需要**。Unity 构建时把它留在了输出目录，而部署脚本又是"整个目录上传"，于是被一并传了上去。
 
 ### 影响
 
-| 指标 | 含符号 | 排除符号 |
-|---|---|---|
-| 产物体积 | 8.83 MB | **4.40 MB（-50%）** |
-| 微信主包 4 MB 限制 | 极易超限 | 有较大余量 |
-| 用户首次下载耗时 | 翻倍 | 正常 |
+| 目录 | 含符号 | 排除符号后 | 节省 |
+|---|---|---|---|
+| `webgl/`（CDN 流量） | 35.90 MB | **31.47 MB** | 4.43 MB（-12.3%） |
+| `minigame/`（微信主包） | 8.83 MB | **4.40 MB** | 4.43 MB（**-50%**） |
+
+- CDN：每个用户首次加载多下 4.43 MB，按访问量放大成真实流量成本
+- 微信：主包限制 4 MB，4.43 MB 的符号直接导致超限
 
 ### 解决
 
-**部署时排除符号文件**，而不是删除——排查崩溃时还需要它。
+**部署时排除符号文件，不要删除**——排查崩溃时还需要它。
 
 ```powershell
-# 方案 A：上传前把符号文件移到归档目录
-$src = "G:\U3D_workface\H5\1\minigame"
-$archive = "G:\U3D_workface\H5\_symbols"
-New-Item -ItemType Directory -Path $archive -Force | Out-Null
-Get-ChildItem $src -Filter "*.symbols.unityweb" -Recurse | Move-Item -Destination $archive -Force
+$symbols = "G:\U3D_workface\H5\_symbols\$(Get-Date -Format yyyyMMdd)"
+New-Item -ItemType Directory -Path $symbols -Force | Out-Null
 
-# 再上传
+# 1. CDN 产物：.symbols.json
+Get-ChildItem "G:\U3D_workface\H5\1\webgl" -Filter "*.symbols.json" -Recurse |
+    Move-Item -Destination $symbols -Force
+
+# 2. 微信产物：.symbols.unityweb
+Get-ChildItem "G:\U3D_workface\H5\1\minigame" -Filter "*.symbols.unityweb" -Recurse |
+    Move-Item -Destination $symbols -Force
+
+# 3. 再上传
 tcb hosting deploy ./webgl webgl -e <环境ID>
 ```
 
-```bash
-# 方案 B：在 .gitignore / .tcbignore 中排除（推荐纳入版本管理）
-**/*.symbols.unityweb
-```
-
 ```csharp
-// 方案 C：构建脚本里自动归档（工程化做法）
-// 构建完成后，把 *.symbols.unityweb 剪切到 VersionedBuilds/Symbols/<版本号>/
+// 方案 B：写进构建脚本（工程化做法）
+// 构建完成后把 **/*.symbols.* 剪切到 VersionedBuilds/Symbols/<版本号>/
 ```
 
-> 符号文件应**按版本号归档**：线上出崩溃时，需要用对应版本的符号才能还原栈。
+> 符号文件应**按版本号归档**：线上出崩溃时，必须用对应版本的符号才能还原栈。
 
 ### 复盘
 
-- **"目录多大 ≠ 上线该多大"**。构建产物目录里常混有调试文件、`.pdb`、`.symbols`、`*.debug` 等非运行时资源，部署前必须筛一遍。
-- **对比是发现问题的第一手段**。WebGL 4.96 MB、小游戏 8.83 MB，两者底层相同却差 78%，这个反常差异直接指向了一个具体文件。
-- **微信小游戏 4 MB 主包限制**是这个平台的硬约束，而调试符号是最容易被忽视的"体积黑洞"。这条经验在真实项目里同样成立，项目越大符号文件越大（可达几十 MB）。
-- 工程化做法：把「排除符号 + 归档符号」写进构建脚本，而不是每次手工检查——这正是本项目脚手架要解决的问题。
+- **一定要先分清产物用途再谈优化**。`webgl/` 和 `minigame/` 约束不同（CDN 流量 vs 微信主包 4MB），混淆两者会导致优化方向完全错误。本次记录最初就犯了此错，后经确认修正。
+- **"目录多大 ≠ 上线该多大"**。构建产物常混有 `.symbols`、`.pdb`、`*.debug` 等非运行时资源，部署前必须筛一遍。
+- **对比是发现问题的第一手段**。`webgl/` 35.90 MB 里有 4.43 MB（12%）、`minigame/` 8.83 MB 里有 4.43 MB（50%），同一份符号在两个产物里占比不同，但都是纯浪费。
+- 工程化做法：把「排除符号 + 按版本归档」写进构建脚本，而不是每次手工检查——这正是本项目脚手架要解决的问题。
+
+---
+
+<a id="p-009"></a>
+## P-009 CDN 上的 WebGL 产物未压缩：14.79 MB 的 wasm 原样下载
+
+**日期**：2026-11-02
+**环境**：WebGL 构建产物 `webgl/`，微信云开发静态托管
+
+### 现象
+
+`webgl/` 目录 35.90 MB，上传 CDN 后用户需要下载全部内容。其中：
+
+| 文件 | 体积 |
+|---|---|
+| `Build/webgl.wasm` | **14.79 MB** |
+| `Build/webgl.data` | 6.36 MB |
+| `Build/webgl.symbols.json` | 4.43 MB |
+
+`.wasm` 是**未压缩的原始二进制**。
+
+### 关键对比
+
+同一份引擎代码，在另一个产物里是这样的：
+
+| 产物 | 文件 | 体积 |
+|---|---|---|
+| `webgl/` | `Build/webgl.wasm`（原始） | **14.79 MB** |
+| `minigame/` | `wasmcode/*.wasm.code.unityweb.wasm.br` | **3.49 MB** |
+
+**brotli 压缩率 76%，体积差 4.2 倍。**
+
+### 根因
+
+Unity WebGL 的默认压缩格式为 **Disabled**（本项目 `webgl/` 产物的 loader 直接引用 `.wasm` 而非 `.gz`/`.br`）。而微信小游戏插件会自行做 brotli 预压缩。
+
+CDN 侧的动态压缩能力取决于托管服务配置，未确认时默认不压缩，导致原始二进制直接下发。
+
+### 解决
+
+**方案 A：Unity 构建时开启压缩（推荐）**
+
+Player Settings → **Publishing Settings** → Compression Format：
+
+| 选项 | 说明 |
+|---|---|
+| `Brotli` | 压缩率最高（可达 76%），现代浏览器普遍支持 |
+| `Gzip` | 兼容性最好，压缩率略低 |
+| `Disabled` | 不压缩，靠服务器动态压缩 |
+
+选 Brotli 后产物会带 `.br` 后缀，需注意 [P-006](Pitfalls.md#p-006) 的 `Content-Encoding` 配置。
+
+**方案 B：CDN 开启 Brotli 动态压缩**
+
+在云开发静态托管 / CDN 控制台开启压缩，由边缘节点对 `.wasm` 实时压缩。优点是不改构建；缺点是首次回源仍需承受原始体积。
+
+### 复盘
+
+- **"本地能跑"和"用户下载多大"是两件事**。本地测试不受带宽限制，不会暴露未压缩的问题。
+- **同一份代码在不同产物里体积差 4 倍**，这种对比最容易暴露配置差异——养成"对比两个构建产物"的习惯。
+- CDN 下载量是**乘上用户数**的成本项：14.79 MB vs 3.49 MB，10 万次加载差 1.1 TB 流量。
 
 ---
 

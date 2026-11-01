@@ -22,9 +22,11 @@
 
 ---
 
-## 2. Android 包体基线
+## 2. 包体基线
 
-### 2.1 首轮对比：IL2CPP vs Mono（空工程）
+> 本章按**产物类型**组织。注意 Unity Minigame 插件一次构建会产出两个不同目录，用途不可混淆，详见 2.4。
+
+### 2.1 Android —— IL2CPP vs Mono（空工程）
 
 **工程内容**：新建 3D 工程，1 个默认场景 + 1 个 UI Text 文字。
 
@@ -36,7 +38,22 @@
 > ⚠️ **这两组数据不可直接横向比较**：构建时勾选了"仅 64 位"，但 Mono 后端在 Unity 2021 下回退到了 32 位 armeabi-v7a。
 > 所以差值中同时包含了「后端差异」和「架构差异」两个变量。若要单独验证后端影响，需固定架构再测一次。
 
-### 2.2 WebGL 包体基线（4.96 MB）
+### 2.2 Android IL2CPP 包体构成（11.04 MB）
+
+**构建配置**：Unity 2021.3.14f1，Release，压缩格式 gzip（产物带 `.gz` 后缀）
+
+| 文件 | 大小 | 占比 | 说明 |
+|---|---|---|---|
+| `Build/webtest.wasm.gz` | 3.72 MB | 75.0% | 引擎 + 用户代码（LLVM 编译产物） |
+| `Build/webtest.data.gz` | 1.13 MB | 22.8% | 场景与资源 |
+| `Build/webtest.framework.js.gz` | 0.07 MB | 1.4% | 运行时胶水代码 |
+| `Build/webtest.loader.js` | 0.02 MB | 0.4% | 加载器 |
+| `index.html` + `TemplateData/` | < 0.01 MB | ~0% | 模板页面与图标 |
+| **合计** | **4.96 MB** | 100% | 共 16 个文件 |
+
+### 2.3 WebGL 早期空工程构建（4.96 MB，`.gz` 模式）
+
+> 这是分离的独立小工程 `webtest` 的首次 WebGL 构建，与 2.4/2.5 的项目产物（`webgl/` 35.90 MB、`minigame/` 8.83 MB）**不是同一个工程**，仅作参考。
 
 **构建配置**：Unity 2021.3.14f1，Release，压缩格式 gzip（产物带 `.gz` 后缀）
 
@@ -67,9 +84,62 @@
 
 浏览器打开 `http://localhost:8080` 可正常渲染默认场景与 UI Text。
 
-### 2.3 微信小游戏包体基线（8.83 MB，含冗余文件）
+### 2.4 Web 端两类产物：`webgl/` 与 `minigame/`
 
-**构建配置**：Unity 2021.3.14f1，Minigame 平台，构建耗时 **< 1 分钟**（空工程）
+Unity 的 Minigame 插件**一次构建会输出两个完全不同的目录**，用途不可混淆：
+
+| | `webgl/` | `minigame/` |
+|---|---|---|
+| **用途** | 上传 CDN，浏览器 / WebView 访问 | 微信开发者工具**直接打开**运行的小程序项目 |
+| **是否上 CDN** | ✅ 是 | ❌ 否（微信包由微信平台分发） |
+| **入口** | `index.html` | `game.js` + `game.json` + `project.config.json` |
+| **总体积** | **35.90 MB** | **8.83 MB** |
+| **文件数** | 9 | 60 |
+| **代码压缩** | ❌ 未压缩（`.wasm` 原始） | ✅ brotli 预压缩（`.br`） |
+| **调试符号** | `Build/webgl.symbols.json` 4.43 MB | `webgl.wasm.symbols.unityweb` 4.43 MB |
+
+**⚠️ 两者是同一工程的两套输出**：`webgl/` 面向"任意浏览器"，`minigame/` 面向"微信运行时"。混淆它们会导致优化方向完全错位——CDN 流量和微信主包限制是两套不同的约束。
+
+---
+
+### 2.5 `webgl/` 包体基线（35.90 MB，上 CDN）
+
+**构建配置**：Unity 2021.3.14f1，WebGL 平台，空工程，构建耗时约 1 分钟
+
+| 文件 | 体积 | 占比 | 状态 |
+|---|---|---|---|
+| `Build/webgl.wasm` | **14.79 MB** | 41.2% | ⚠️ 未压缩 |
+| `Build/webgl.data` | **6.36 MB** | 17.7% | ⚠️ 未压缩 |
+| `Build/webgl.symbols.json` | **4.43 MB** | 12.3% | ❌ **调试符号** |
+| `535a156b...data.unityweb.bin.txt` | 6.35 MB | 17.7% | 根目录数据文件 |
+| `Build/webgl.framework.js` | 0.44 MB | 1.2% | |
+| `0f345f5...wasm.code.unityweb.wasm.br` | 3.49 MB | 9.7% | 已 brotli 压缩 |
+| `index.html` + `Build/webgl.loader.js` | 0.03 MB | ~0% | |
+| **合计** | **35.90 MB** | 100% | |
+
+**核心问题：CDN 上是 35.90 MB，用户要下载这么多**
+
+| 优化项 | 当前 | 优化后 | 手段 |
+|---|---|---|---|
+| 排除调试符号 | 35.90 MB | 31.47 MB（-12.3%） | 上传前移出 `*.symbols.json` |
+| 开启服务端压缩 | `wasm` 14.79 MB → | 约 **3.5 MB** | CDN 开启 **brotli**（参照 `minigame/` 的 `.br` 效果：14.79 → 3.49，**压比 76%**） |
+
+> **关键对比**：同一份 wasm 代码
+> - `webgl/Build/webgl.wasm` = **14.79 MB**（原始）
+> - `minigame/wasmcode/*.wasm.code.unityweb.wasm.br` = **3.49 MB**（brotli）
+>
+> 差距 **4.2 倍**。CDN 若不开 brotli，用户下载量会多出约 11 MB。
+
+**处理建议**
+
+1. **上传前排除符号文件**：`Build/webgl.symbols.json`
+2. **CDN 开启 Brotli 预压缩 / 动态压缩**：微信云开发静态托管的压缩能力需确认
+3. 或在 Unity 中调整 WebGL 的 Compression Format，让产物直接带压缩
+
+---
+
+### 2.6 `minigame/` 包体基线（8.83 MB，微信运行时）
+
 **AppID**：`wx4d2f7d...`，projectname `aitt`，compileType `game`
 
 | 顶级目录 | 体积 | 占比 | 文件数 | 说明 |
@@ -82,16 +152,14 @@
 
 **最大的那些文件**
 
-| 文件 | 体积 | 是否该上传 |
+| 文件 | 体积 | 是否必需 |
 |---|---|---|
-| `webgl.wasm.symbols.unityweb` | **4.43 MB** | ❌ **调试符号，不应上传** |
+| `webgl.wasm.symbols.unityweb` | **4.43 MB** | ❌ **调试符号，运行不需要** |
 | `wasmcode/*.wasm.code.unityweb.wasm.br` | 3.49 MB | ✅ 必需 |
 | `webgl.wasm.framework.unityweb.js` | 0.45 MB | ✅ 必需 |
 | `unity-sdk/sdk.js` | 0.17 MB | ✅ 必需 |
 
-**⚠️ 关键发现：`webgl.wasm.symbols.unityweb` 占全包 50%**
-
-这是 IL2CPP 构建的**调试符号表**，只用于崩溃栈还原，运行时完全不需要。当前它被打进了产物目录，如果整目录上传会白白占用约 4.4 MB。
+**⚠️ 调试符号占全包 50%**
 
 | 状态 | 体积 |
 |---|---|
@@ -100,9 +168,9 @@
 
 **处理方式**
 
-- 删除或用 `.gitignore` / 上传脚本排除 `*.symbols.unityweb`
-- 符号文件建议**单独归档**（上传到云存储的独立目录），发布后需要排查崩溃时再下载
-- 微信小游戏主包限制 4 MB，**这个文件是首包超限的首要原因之一**
+- 微信开发者工具的「上传」会自动按 `project.config.json` 的 `packOptions.ignore` 过滤，但**本地目录体积仍会被误判**
+- 若体积触发主包限制，优先排除 `*.symbols.unityweb`
+- 符号文件按版本归档到云存储，排查线上崩溃时下载
 
 **game.json 关键配置**
 
@@ -123,22 +191,24 @@
 - `wasmcode` 已配置为**分包并并行预加载**，符合微信小游戏 4 MB 主包限制的做法
 - 使用官方 `UnityPlugin` 插件（isolatedContext），说明构建走了正常的微信小游戏导出流程
 
-### 2.4 三端体积横向对比
+---
 
-| 平台 | 后端 | 架构 | 体积 | 最大构成项 | 占比 |
-|---|---|---|---|---|---|
-| Android | IL2CPP | arm64-v8a | 11.04 MB | `libunity.so` + `libil2cpp.so` = 9.20 MB | 83.4% |
-| Android | Mono | armeabi-v7a | 20.23 MB | `libunity.so` 8.66 MB | 42.8% |
-| **WebGL** | IL2CPP → wasm | — | **4.96 MB** | `webtest.wasm.gz` 3.72 MB | 75.0% |
-| **微信小游戏** | IL2CPP → wasm | — | **8.83 MB**（清理后 4.40 MB） | symbols 4.43 MB（冗余）+ wasm 3.49 MB | 50% / 39.5% |
+### 2.7 四类产物体积横向对比
 
-**观察 1**：WebGL 包体明显小于 Android。原因是 wasm 是面向虚拟机的紧凑字节码，不含 ARM 指令集对齐填充与平台 ABI 冗余；而原生库需要携带完整的机器码与符号信息。
+| 产物 | 平台 | 体积 | 最大构成项 | 占比 |
+|---|---|---|---|---|
+| APK | Android IL2CPP arm64 | 11.04 MB | `libunity.so` + `libil2cpp.so` = 9.20 MB | 83.4% |
+| APK | Android Mono armv7 | 20.23 MB | `libunity.so` 8.66 MB | 42.8% |
+| **`webgl/`** | WebGL → CDN | **35.90 MB** | `webgl.wasm` 14.79 MB（未压缩） | 41.2% |
+| **`minigame/`** | 微信小游戏 | **8.83 MB** | 调试符号 4.43 MB（可去除） | 50.2% |
 
-**观察 2**：微信小游戏体积大于纯 WebGL（8.83 vs 4.96 MB），差异来自两处：① 多了 4.43 MB 调试符号（可去除）；② 多了 0.37 MB 微信 SDK 适配层。剔除符号文件后是 **4.40 MB**，与 WebGL **基本持平**，符合预期——两者底层都是 wasm。
+**观察 1**：`webgl/` 最大，因为它**未压缩**。同一份代码在 `minigame/` 里被 brotli 压到 3.49 MB，压比 76%。
 
-**共性结论**：三端都呈现「引擎占绝对大头」的特征（75%–83%），业务资源在空工程中占比极低。这说明包体优化的效果与项目资源量强相关，**报告优化成果时必须说明优化基数**。
+**观察 2**：`minigame/` 体积虚高一半是调试符号。排除后 **4.40 MB**，反而比未压缩的 `webgl/` 小得多——因为微信侧做了预压缩，而 CDN 侧没有。
 
-### 2.4 IL2CPP 包体构成（11.04 MB）
+**观察 3**：两类 web 产物的真正可比口径是**传输体积**（用户实际下载）：`webgl/` 若开 brotli 约 8–9 MB，`minigame/` 主包约 4.4 MB。
+
+**共性结论**：所有平台都呈现「引擎占绝对大头」的特征（75%–83%），业务资源在空工程中占比极低。包体优化的效果与项目资源量强相关，**报告优化成果时必须说明优化基数**。
 
 | 条目 | 原始 | 压缩后 | 占比 | 说明 |
 |---|---|---|---|---|
@@ -161,7 +231,7 @@
 
 **结论：空工程里 83% 是引擎本体，业务资源占比不足 1%。** 这解释了为什么"空包做不到显著瘦身"——优化的空间来自资源量，不是代码量。
 
-### 2.3 Mono 包体构成（20.23 MB）
+### 2.8 Android Mono 包体构成（20.23 MB）
 
 | 条目 | 原始 | 压缩后 | 说明 |
 |---|---|---|---|
@@ -176,7 +246,7 @@
 
 **结论**：Mono 的额外体积来自两处——32 位 `libunity.so`（+4.4 MB）与整套 .NET 类库 + Mono 运行时（约 +6.5 MB）。
 
-### 2.4 后端选型结论
+### 2.9 后端选型结论
 
 | 维度 | IL2CPP | Mono |
 |---|---|---|

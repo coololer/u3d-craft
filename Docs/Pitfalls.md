@@ -13,6 +13,7 @@
 - [P-003 Mono 打包比 IL2CPP 还大](#p-003)
 - [P-004 Ollama 已下载模型但 API 返回空列表](#p-004)
 - [P-005 Ollama 推理报 CUDA error: device kernel image is invalid](#p-005)
+- [P-006 WebGL 部署白屏：.gz 压缩与服务器 MIME 配置](#p-006)
 
 ---
 
@@ -347,6 +348,96 @@ Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serv
 - 错误信息里 `device kernel image is invalid` 是很明确的信号：**驱动与 CUDA 运行时不匹配**，不要误以为是模型损坏去重下模型。
 - 环境扫描结果（驱动偏旧）在第一天就出现过，当时判断为「建议升级」，事后证明它会实际阻塞。**"建议"和"阻塞"的界限，要动手验证才知道。**
 - 计划上这类问题的处理策略：**不阻塞主线**，主力方案切云端，本地路径降级为待办。
+
+---
+
+<a id="p-006"></a>
+## P-006 WebGL 部署白屏：.gz 压缩与服务器 MIME 配置
+
+**日期**：2026-11-01
+**环境**：Unity 2021.3.14f1，WebGL 构建，gzip 压缩
+
+### 现象
+
+WebGL 构建成功（4.96 MB），本地 `python -m http.server` 打开正常。但换到其它静态服务器 / CDN / 微信小游戏环境时，常见问题是**页面卡在加载条、或直接白屏**，控制台报 wasm 或 data 文件加载失败。
+
+### 根因
+
+Unity 2021 的 WebGL 产物默认是 `.gz` 压缩包：
+
+```javascript
+config = {
+  dataUrl:      buildUrl + "/webtest.data.gz",
+  frameworkUrl: buildUrl + "/webtest.framework.js.gz",
+  codeUrl:      buildUrl + "/webtest.wasm.gz",
+  // 注意：没有 decompressionFallback 字段
+}
+```
+
+**加载器不含解压逻辑，完全依赖服务器告诉浏览器"这是 gzip 内容"**。服务器必须返回：
+
+```
+Content-Encoding: gzip
+```
+
+如果服务器只是把 `.gz` 当作普通文件按 `application/octet-stream` 或 `application/gzip` 返回（只是 MIME 类型，没有 `Content-Encoding`），浏览器不会自动解压，Unity 拿到的是压缩字节流，解析失败 → 白屏。
+
+### 排查方法
+
+浏览器 F12 → Network，找到 `webtest.wasm.gz`：
+
+| 检查点 | 正常 | 异常 |
+|---|---|---|
+| Status | 200 | 404 / 403 |
+| **Content-Encoding** | `gzip` | **缺失** ← 白屏主因 |
+| Content-Type | `application/wasm` 或任意 | — |
+| 响应大小 | ≈ 3.72 MB（未解压前） | — |
+
+也可以用命令行直接验证：
+
+```bash
+curl -sI http://localhost:8080/Build/webtest.wasm.gz | findstr /i "content-encoding content-type"
+```
+
+### 解决
+
+**方案 A：正确配置服务器（推荐）**
+
+| 服务器 | 配置方式 |
+|---|---|
+| Nginx | `gzip_static on;`（会自动为 `.gz` 文件补 `Content-Encoding: gzip`） |
+| IIS | 在 `web.config` 的 `<staticContent>` 中添加 `.gz` 的 mimeMap，并确保「静态内容压缩」已启用 |
+| 阿里云 OSS / 腾讯云 COS | 对象上传时设置 `Content-Encoding: gzip` 元数据 |
+| Python http.server | 默认可用（本项目实测 4 个资源均 200） |
+
+**方案 B：构建时开启 Decompression Fallback（更省心）**
+
+Player Settings → **Publishing Settings** → 勾选 **Decompression Fallback**
+
+- 加载器自带解压实现，不依赖服务器配置
+- 代价：包体增加约 20–30 KB，首次加载需在浏览器侧解压，略慢
+- **外网部署、微信小游戏、第三方托管建议开启**
+
+**方案 C：关闭压缩**
+
+Player Settings → Compression Format → **Disabled**
+
+- 产物为未压缩的 `.wasm` / `.data`，服务器可开启动态 gzip
+- 代价：体积可能略大，依赖服务器压缩能力
+
+### 结果
+
+本项目当前状态：
+
+- 本地 `python -m http.server 8080` 正常，4 个关键资源全部 200
+- 浏览器可渲染默认场景与 UI Text
+- **尚未开启 Decompression Fallback**，正式部署前需评估
+
+### 复盘
+
+- **WebGL 的坑往往不在构建阶段，而在部署阶段**。本地能跑不代表线上能跑——测试环境和生产环境的 MIME / 压缩配置经常不同。
+- 优先检查 `Content-Encoding` 而不是 `Content-Type`。很多人看到 `application/gzip` 就以为对了，但这只是声明文件类型，不等于告诉浏览器要解压。
+- 涉及多端交付时，**统一在构建脚本里固化这些配置**（如 Addressables 的压缩格式、WebGL 的 fallback 开关），比每次手动勾选更可靠——这正是本项目「一键三端出包」要解决的问题。
 
 ---
 

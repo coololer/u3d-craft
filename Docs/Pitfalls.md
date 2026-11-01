@@ -11,6 +11,7 @@
 - [P-001 Unity 2021.3.14f1 打 APK 失败：Android SDK 许可证未接受](#p-001)
 - [P-002 包体分析：空包 11MB，引擎占 83%](#p-002)
 - [P-003 Mono 打包比 IL2CPP 还大](#p-003)
+- [P-004 Ollama 已下载模型但 API 返回空列表](#p-004)
 
 ---
 
@@ -196,6 +197,75 @@ for i in sorted(z.infolist(), key=lambda x: -x.compress_size)[:15]:
 
 - **对比实验必须控制变量**。这次对比同时变了「后端」和「架构」两个量，严格来说不构成有效对照。下一步应固定架构重测，或明确标注结论的局限性。
 - 面试表达时不要简单说"IL2CPP 比 Mono 小"，而要说清楚"在空工程、架构不一致条件下的一次观察"，并讲出两个原因——细节比结论更值钱。
+
+---
+
+<a id="p-004"></a>
+## P-004 Ollama 已下载模型但 API 返回空列表
+
+**日期**：2026-11-01
+**环境**：Ollama 0.40.13，Win10 24H2，RTX 3070 Ti Laptop 8 GB
+
+### 现象
+
+`OLLAMA_MODELS` 已设为 `E:\AI\ollama\models`，该目录下确实有 4.36 GB 文件，manifest 也存在。但：
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+# {"models":[]}
+
+ollama list
+# 空表
+```
+
+### 排查过程
+
+| 步骤 | 动作 | 发现 |
+|---|---|---|
+| 1 | 看模型目录大小 | `E:\AI\ollama\models` = 4.36 GB，**不是空的** |
+| 2 | 检查 blobs | 主权重 `sha256-2bada8a7...` = 4.36 GB，与 manifest 声明的 4683073952 字节一致 |
+| 3 | 检查 manifests | `registry.ollama.ai/library/qwen2.5/7b` 存在，模型确实注册成功 |
+| 4 | 手动 `ollama serve` | 报错 `bind: Only one usage of each socket address` —— **11434 已被别的实例占用** |
+| 5 | `netstat -ano \| findstr :11434` | PID 12348 在 LISTENING |
+| 6 | 查该进程 | 读不到信息（运行在另一个会话/权限域），且启动时间早于环境变量设置 |
+
+### 根因
+
+**Ollama 是常驻服务，只在启动时读取一次 `OLLAMA_MODELS`。**
+
+修改环境变量后，已运行的实例不会重新读取，仍然使用启动时的旧路径（`C:\Users\<user>\.ollama\models`，空的）。而新起的实例因为端口被占又起不来，于是：
+
+- 模型文件在 E 盘 ✅
+- 服务读的是 C 盘空目录 ❌
+- 两边都"看起来没问题"，但 API 就是返回空
+
+### 解决
+
+必须**彻底结束旧实例**再重启：
+
+```powershell
+# 1. 结束所有 Ollama 进程（注意还有托盘应用 "ollama app"）
+Get-Process ollama, "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+# 2. 确认端口已释放（应无输出）
+netstat -ano | findstr :11434
+
+# 3. 带新环境变量启动
+$env:OLLAMA_MODELS = "E:\AI\ollama\models"
+Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden
+
+# 4. 验证
+curl http://127.0.0.1:11434/api/tags
+```
+
+> **最容易漏的一步**：只结束 `ollama.exe` 不够，托盘里的 `ollama app.exe`（GUI 启动器）会自动把服务再拉起来，而且这次拉起的实例同样带旧环境变量。要在系统托盘右键退出，或用上面的命令同时结束两个进程。
+
+### 复盘
+
+- **"文件在"≠"服务在用"**。排查这类问题时，要区分「磁盘状态」和「运行时状态」，分别验证。
+- 修改服务的环境变量后，**必须重启该服务**才生效——这一点对 Ollama、Docker、数据库等都成立。
+- Windows 上这类"后台服务 + 托盘应用"的双进程结构，是排查时的高频陷阱。
+- 验证顺序建议：先看文件 → 再看进程 → 再看端口 → 最后看 API，逐层排除。
 
 ---
 

@@ -114,6 +114,72 @@ cd Build/Output/WebGL && python -m http.server 8080
 
 ---
 
+## 本地 AI 环境（Ollama）
+
+用于 AI NPC / GameCopilot 的**离线兜底模型**与本地对比实验。云端 API 为主（DeepSeek / 通义千问），本地模型负责断网降级与成本控制。
+
+### 前置条件
+
+| 项目 | 要求 |
+|---|---|
+| Ollama | ≥ 0.40 |
+| 显存 | ≥ 6 GB 可跑 7B（Q4），8 GB 更稳 |
+| 磁盘 | 每个 7B 模型约 5 GB |
+
+> 显存不足时 Ollama 会溢出到内存，速度骤降到几 tok/s。14B 及以上模型在 8 GB 显存上不适合日常使用。
+
+### 把模型目录迁出 C 盘（强烈建议）
+
+Ollama 默认把模型放在 `C:\Users\<user>\.ollama\models`。C 盘紧张时先迁移：
+
+```powershell
+# 1. 设置模型目录（用户级环境变量，永久生效）
+[Environment]::SetEnvironmentVariable("OLLAMA_MODELS", "E:\AI\ollama\models", "User")
+
+# 2. 建目录
+New-Item -ItemType Directory -Path "E:\AI\ollama\models" -Force
+
+# 3. 关键：必须重启 Ollama 服务，新目录才对当前实例生效
+Get-Process ollama, "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force
+$env:OLLAMA_MODELS = "E:\AI\ollama\models"
+Start-Process "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" -ArgumentList "serve" -WindowStyle Hidden
+```
+
+### 拉取模型并验证
+
+```powershell
+ollama pull qwen2.5:7b
+ollama list                                   # 应看到 qwen2.5:7b
+ollama run qwen2.5:7b "用一句话介绍 Addressables"
+```
+
+服务端验证（绕过 CLI，直接查 API）：
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+### 排错
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `ollama list` 为空，但模型目录有几 GB 文件 | 服务实例未继承 `OLLAMA_MODELS`，去读了 C 盘空目录 | 完全退出 Ollama（含托盘图标）后重启 |
+| `bind: Only one usage of each socket address` | 已有实例占用 11434，新的起不来 | 先 `Stop-Process` 旧实例，或直接复用现有实例 |
+| 模型下载中断后重下 | 部分分片保留，Ollama 会续传 | 直接重跑 `ollama pull` 即可 |
+| 生成速度极慢（<3 tok/s） | 模型超出显存，溢出到内存 | 换更小的模型（如 `qwen2.5:3b`） |
+
+### 本项目对本地模型的定位
+
+| 用途 | 方案 |
+|---|---|
+| 主力推理 | 云端 API（DeepSeek / 通义千问） |
+| 断网降级 | 本地 `qwen2.5:7b` |
+| 成本敏感场景 | 本地小模型 + 云端缓存 |
+
+> 面试可讲：任何 AI 功能都保留本地兜底路径，既控制成本，也避免服务不可用导致玩法不可玩。
+
+---
+
 ## Roadmap
 
 - [x] 仓库初始化与 `.gitignore` 配置

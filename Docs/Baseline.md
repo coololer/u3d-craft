@@ -67,15 +67,74 @@
 
 浏览器打开 `http://localhost:8080` 可正常渲染默认场景与 UI Text。
 
-### 2.3 三端体积横向对比
+### 2.3 微信小游戏包体基线（8.83 MB，含冗余文件）
+
+**构建配置**：Unity 2021.3.14f1，Minigame 平台，构建耗时 **< 1 分钟**（空工程）
+**AppID**：`wx4d2f7d...`，projectname `aitt`，compileType `game`
+
+| 顶级目录 | 体积 | 占比 | 文件数 | 说明 |
+|---|---|---|---|---|
+| （根文件） | 4.96 MB | 56.2% | 11 | 含 **`webgl.wasm.symbols.unityweb` 4.43 MB** |
+| `wasmcode/` | 3.49 MB | 39.5% | 2 | wasm code 分包（`.br` 格式） |
+| `unity-sdk/` | 0.37 MB | 4.2% | 43 | 微信 Unity SDK 适配层 |
+| `images/` `workers/` `data-package/` | < 0.02 MB | ~0% | 4 | 图标、worker、data 分包 |
+| **合计** | **8.83 MB** | 100% | 60 | |
+
+**最大的那些文件**
+
+| 文件 | 体积 | 是否该上传 |
+|---|---|---|
+| `webgl.wasm.symbols.unityweb` | **4.43 MB** | ❌ **调试符号，不应上传** |
+| `wasmcode/*.wasm.code.unityweb.wasm.br` | 3.49 MB | ✅ 必需 |
+| `webgl.wasm.framework.unityweb.js` | 0.45 MB | ✅ 必需 |
+| `unity-sdk/sdk.js` | 0.17 MB | ✅ 必需 |
+
+**⚠️ 关键发现：`webgl.wasm.symbols.unityweb` 占全包 50%**
+
+这是 IL2CPP 构建的**调试符号表**，只用于崩溃栈还原，运行时完全不需要。当前它被打进了产物目录，如果整目录上传会白白占用约 4.4 MB。
+
+| 状态 | 体积 |
+|---|---|
+| 原始产物 | 8.83 MB |
+| 移除符号文件后 | **4.40 MB（-50%）** |
+
+**处理方式**
+
+- 删除或用 `.gitignore` / 上传脚本排除 `*.symbols.unityweb`
+- 符号文件建议**单独归档**（上传到云存储的独立目录），发布后需要排查崩溃时再下载
+- 微信小游戏主包限制 4 MB，**这个文件是首包超限的首要原因之一**
+
+**game.json 关键配置**
+
+```json
+{
+  "deviceOrientation": "landscapeRight",
+  "iOSHighPerformance": true,
+  "subpackages": [
+    { "name": "wasmcode", "root": "wasmcode/" },
+    { "name": "data-package", "root": "data-package/" }
+  ],
+  "parallelPreloadSubpackages": [{ "name": "wasmcode" }],
+  "plugins": { "UnityPlugin": { "version": "1.2.31", "provider": "wxe5a48f1ed5f544b7" } },
+  "workers": "workers"
+}
+```
+
+- `wasmcode` 已配置为**分包并并行预加载**，符合微信小游戏 4 MB 主包限制的做法
+- 使用官方 `UnityPlugin` 插件（isolatedContext），说明构建走了正常的微信小游戏导出流程
+
+### 2.4 三端体积横向对比
 
 | 平台 | 后端 | 架构 | 体积 | 最大构成项 | 占比 |
 |---|---|---|---|---|---|
 | Android | IL2CPP | arm64-v8a | 11.04 MB | `libunity.so` + `libil2cpp.so` = 9.20 MB | 83.4% |
 | Android | Mono | armeabi-v7a | 20.23 MB | `libunity.so` 8.66 MB | 42.8% |
 | **WebGL** | IL2CPP → wasm | — | **4.96 MB** | `webtest.wasm.gz` 3.72 MB | 75.0% |
+| **微信小游戏** | IL2CPP → wasm | — | **8.83 MB**（清理后 4.40 MB） | symbols 4.43 MB（冗余）+ wasm 3.49 MB | 50% / 39.5% |
 
-**观察**：WebGL 包体明显小于 Android。原因是 wasm 是面向虚拟机的紧凑字节码，不含 ARM 指令集对齐填充与平台 ABI 冗余；而原生库需要携带完整的机器码与符号信息。
+**观察 1**：WebGL 包体明显小于 Android。原因是 wasm 是面向虚拟机的紧凑字节码，不含 ARM 指令集对齐填充与平台 ABI 冗余；而原生库需要携带完整的机器码与符号信息。
+
+**观察 2**：微信小游戏体积大于纯 WebGL（8.83 vs 4.96 MB），差异来自两处：① 多了 4.43 MB 调试符号（可去除）；② 多了 0.37 MB 微信 SDK 适配层。剔除符号文件后是 **4.40 MB**，与 WebGL **基本持平**，符合预期——两者底层都是 wasm。
 
 **共性结论**：三端都呈现「引擎占绝对大头」的特征（75%–83%），业务资源在空工程中占比极低。这说明包体优化的效果与项目资源量强相关，**报告优化成果时必须说明优化基数**。
 
@@ -141,6 +200,11 @@
 | 1 | 2026-11-01 | Android | IL2CPP | arm64-v8a | ~5 min | 含 Gradle 依赖下载，**非纯构建耗时** |
 | 2 | 2026-11-01 | Android | Mono | armeabi-v7a | — | 未单独计时 |
 | 3 | 2026-11-01 | WebGL | IL2CPP → wasm | — | **~1 min** | 空工程，首次构建 |
+| 4 | 2026-11-02 | 微信小游戏 | IL2CPP → wasm | — | **< 1 min** | 空工程，首次构建 |
+
+> **计时口径**：从点击 Build 到产物落盘的墙钟时间，构建前不清理 Library。
+> **精度说明**：当前为人工目测的近似值（"约 5 分钟"/"约 1 分钟"），仅用于量级判断。
+> 后续做「出包耗时缩短 X%」这类结论前，必须改用可复现的计时方式（记录精确到秒的时间戳，同配置连测 2 次取第二次）。
 
 > **计时口径**：从点击 Build 到产物落盘的墙钟时间，构建前不清理 Library。
 > **精度说明**：当前为人工目测的近似值（"约 5 分钟"/"约 1 分钟"），仅用于量级判断。
@@ -151,6 +215,7 @@
 | 对比 | 差异 | 原因 |
 |---|---|---|
 | WebGL ≈ 1 min vs Android ≈ 5 min | 约 5× | Android 需 Gradle 编译、Java 打包、签名、IL2CPP 交叉编译；WebGL 只需 IL2CPP → wasm 与资源烘焙 |
+| 微信小游戏 < 1 min vs WebGL ≈ 1 min | 持平 | 两者底层都是 wasm，构建链路几乎相同 |
 | 空工程 vs 实际项目 | 差距会显著扩大 | 空工程无资源导入、无图集打包、无 Addressables 构建；真实项目耗时主要来自资源处理 |
 
 > ⚠️ 这组数据**不能直接引用为项目级基线**。空工程的构建耗时几乎全部是引擎编译开销，不代表实际业务项目的耗时分布。
@@ -169,6 +234,7 @@
 
 | 目标 | 当前 | 手段 | 预期 |
 |---|---|---|---|
+| **`*.symbols.unityweb`（小游戏）** | **4.43 MB** | **上传时排除，单独归档** | **大（-50%）** |
 | `unity default resources` | 0.39 MB | 剔除未使用默认 UI/字体资源 | 小 |
 | `global-metadata.dat` | 0.77 MB | Strip Engine Code + 精简命名空间 | 小 |
 | `data.unity3d` | 0.49 MB | Addressables 拆包，首包只留启动资源 | 中（项目变大后显著） |

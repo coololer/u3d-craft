@@ -14,6 +14,8 @@
 - [P-004 Ollama 已下载模型但 API 返回空列表](#p-004)
 - [P-005 Ollama 推理报 CUDA error: device kernel image is invalid](#p-005)
 - [P-006 WebGL 部署白屏：.gz 压缩与服务器 MIME 配置](#p-006)
+- [P-007 npm 全局安装 tcb 失败：PowerShell 执行策略与国内镜像](#p-007)
+- [P-008 微信小游戏体积翻倍：调试符号文件被打包](#p-008)
 
 ---
 
@@ -441,4 +443,145 @@ Player Settings → Compression Format → **Disabled**
 
 ---
 
-*最后更新：2026-11-01*
+<a id="p-007"></a>
+## P-007 npm 全局安装 tcb 失败：PowerShell 执行策略与国内镜像
+
+**日期**：2026-11-02
+**环境**：Windows 10 24H2，Node.js 26.13.0，npm 11.20.0
+**目标**：安装 CloudBase CLI（`tcb`）用于部署微信小游戏 WebGL 资源
+
+### 现象
+
+执行 `npm i -g @cloudbase/cli` 报错，无法安装。Windows 上 npm 全局包会生成 `.ps1` 包装脚本，而 PowerShell 默认执行策略为 `Restricted`，会拦截脚本执行。
+
+### 根因
+
+两个独立问题叠加：
+
+1. **PowerShell 执行策略**：默认 `Restricted` 禁止运行任何 `.ps1` 脚本，npm 安装时生成的 `tcb.ps1` 无法执行，安装流程中断。
+2. **npm 默认源在国内下载慢/超时**：`registry.npmjs.org` 在国内网络下经常超时，导致依赖下载失败。
+
+### 解决
+
+**步骤 1：放开当前用户的执行策略**
+
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+参数含义：
+- `RemoteSigned`：本地写的脚本可直接运行，从网络下载的脚本需有可信签名
+- `-Scope CurrentUser`：只影响当前用户，不改系统全局策略，**不需要管理员权限**
+
+> ⚠️ 不要用 `-Scope LocalMachine -ExecutionPolicy Unrestricted`，这会放开整台机器的限制，安全风险更大。
+
+**步骤 2：改用国内镜像源安装（不修改全局配置）**
+
+```powershell
+npm i -g @cloudbase/cli --registry=http://mirrors.cloud.tencent.com/npm/
+```
+
+- 只在本次安装生效，不污染 `npm config`
+- 腾讯云镜像与 tcb 同源，包版本一致，下载快
+- 常用备选：`https://registry.npmmirror.com`
+
+**步骤 3：验证**
+
+```powershell
+tcb --version
+# CloudBase CLI 3.8.11
+```
+
+### 结果
+
+```
+npm ls -g --depth=0
+`-- @cloudbase/cli@3.8.11
+```
+
+安装成功，随后可正常执行部署：
+
+```powershell
+tcb hosting deploy ./webgl webgl -e <环境ID>
+```
+
+该命令把整个 `webgl` 目录上传到云开发静态网站托管的 `webgl` 目录。
+
+### 复盘
+
+- **`--registry` 临时参数优于 `npm config set registry`**：前者只影响一次安装，后者会改变所有项目的安装源，团队协作时容易出问题。如果确实要改全局，记得改回来：`npm config delete registry`。
+- **`Set-ExecutionPolicy` 的 Scope 很关键**：`CurrentUser` 是最小影响面，面试时被问到"怎么在 Windows 上跑脚本"能答出这一点，比笼统说"改执行策略"专业。
+- npm 全局安装失败时，**先看是权限/策略问题还是网络问题**。这次两者都有，只处理其中一个仍会失败——这也是排查中容易反复踩的点：修了执行策略以为好了，结果卡在下载超时。
+
+---
+
+<a id="p-008"></a>
+## P-008 微信小游戏体积翻倍：调试符号文件被打包
+
+**日期**：2026-11-02
+**环境**：Unity 2021.3.14f1，Minigame 平台
+
+### 现象
+
+空工程构建微信小游戏，产物目录 **8.83 MB**。而同一工程的纯 WebGL 构建只有 **4.96 MB**，两者底层都是 wasm，体积不该差这么多。
+
+### 排查
+
+按顶级目录归类统计：
+
+| 条目 | 体积 |
+|---|---|
+| `webgl.wasm.symbols.unityweb`（根目录） | **4.43 MB** |
+| `wasmcode/*.br` | 3.49 MB |
+| `unity-sdk/` | 0.37 MB |
+| 其他 | < 0.02 MB |
+
+**根因**：`webgl.wasm.symbols.unityweb` 是 IL2CPP 构建生成的**调试符号表**，体积高达 4.43 MB，占整个产物的 50%。它只用于把崩溃栈地址还原成函数名，**运行时完全不需要**。
+
+Unity 构建时把符号文件留在了输出目录里，如果按"整个目录上传"的方式部署，就会把这 4.43 MB 一起传上去。
+
+### 影响
+
+| 指标 | 含符号 | 排除符号 |
+|---|---|---|
+| 产物体积 | 8.83 MB | **4.40 MB（-50%）** |
+| 微信主包 4 MB 限制 | 极易超限 | 有较大余量 |
+| 用户首次下载耗时 | 翻倍 | 正常 |
+
+### 解决
+
+**部署时排除符号文件**，而不是删除——排查崩溃时还需要它。
+
+```powershell
+# 方案 A：上传前把符号文件移到归档目录
+$src = "G:\U3D_workface\H5\1\minigame"
+$archive = "G:\U3D_workface\H5\_symbols"
+New-Item -ItemType Directory -Path $archive -Force | Out-Null
+Get-ChildItem $src -Filter "*.symbols.unityweb" -Recurse | Move-Item -Destination $archive -Force
+
+# 再上传
+tcb hosting deploy ./webgl webgl -e <环境ID>
+```
+
+```bash
+# 方案 B：在 .gitignore / .tcbignore 中排除（推荐纳入版本管理）
+**/*.symbols.unityweb
+```
+
+```csharp
+// 方案 C：构建脚本里自动归档（工程化做法）
+// 构建完成后，把 *.symbols.unityweb 剪切到 VersionedBuilds/Symbols/<版本号>/
+```
+
+> 符号文件应**按版本号归档**：线上出崩溃时，需要用对应版本的符号才能还原栈。
+
+### 复盘
+
+- **"目录多大 ≠ 上线该多大"**。构建产物目录里常混有调试文件、`.pdb`、`.symbols`、`*.debug` 等非运行时资源，部署前必须筛一遍。
+- **对比是发现问题的第一手段**。WebGL 4.96 MB、小游戏 8.83 MB，两者底层相同却差 78%，这个反常差异直接指向了一个具体文件。
+- **微信小游戏 4 MB 主包限制**是这个平台的硬约束，而调试符号是最容易被忽视的"体积黑洞"。这条经验在真实项目里同样成立，项目越大符号文件越大（可达几十 MB）。
+- 工程化做法：把「排除符号 + 归档符号」写进构建脚本，而不是每次手工检查——这正是本项目脚手架要解决的问题。
+
+---
+
+*最后更新：2026-11-02*

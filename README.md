@@ -183,22 +183,87 @@ curl http://127.0.0.1:11434/api/tags
 ## Roadmap
 
 - [x] 仓库初始化与 `.gitignore` 配置
-- [x] 包体与性能基线数据表（Android IL2CPP / Mono / WebGL 三组实测）
+- [x] 包体与性能基线数据表（Android IL2CPP / Mono / WebGL / 微信小游戏 四组实测）
+- [x] **三端出包链路全打通**（Android / WebGL / 微信小游戏）
+- [x] **微信小游戏云端部署**（云开发静态托管 + CloudBase CLI）
 - [ ] 通用小游戏框架（事件总线 / 对象池 / 状态机）
 - [ ] Addressables 分组策略与远程加载
 - [ ] 命令行一键三端出包
 - [ ] GitHub Actions CI 自动构建
 - [ ] HybridCLR 热更新接入
-- [ ] 微信小游戏首包裁剪到 4MB 以内
+- [ ] 微信小游戏首包裁剪到 4MB 以内（已定位主要体积来源，见 P-008）
 
-### 已完成的三端交付进度
+### 三端交付进度
 
-| 平台 | 状态 | 包体 | 备注 |
-|---|---|---|---|
-| Android (IL2CPP arm64) | ✅ 已打通 | 11.04 MB | 需修复 SDK 许可证，见 P-001 |
-| Android (Mono armv7) | ✅ 已打通 | 20.23 MB | 开发调试用，见 P-003 |
-| WebGL | ✅ 已打通 | 4.96 MB | 部署需注意 `.gz` 配置，见 P-006 |
-| 微信小游戏 | ⏳ 未开始 | — | 需 Minigame 模块 + 首包 4MB 裁剪 |
+| 平台 | 构建 | 部署 | 包体 | 备注 |
+|---|---|---|---|---|
+| Android (IL2CPP arm64) | ✅ | — | 11.04 MB | 需修复 SDK 许可证，见 P-001 |
+| Android (Mono armv7) | ✅ | — | 20.23 MB | 开发调试用，见 P-003 |
+| WebGL | ✅ | 本地 HTTP | 4.96 MB | 部署需注意 `.gz` 配置，见 P-006 |
+| **微信小游戏** | ✅ | ✅ **云端 CDN** | 8.83 MB → **4.40 MB** | 需排除调试符号，见 P-008 |
+
+### 构建耗时（空工程实测）
+
+| 平台 | 耗时 | 说明 |
+|---|---|---|
+| Android (IL2CPP) | ~5 min | 含 Gradle 依赖下载 |
+| WebGL | ~1 min | |
+| 微信小游戏 | < 1 min | 与 WebGL 同源 |
+
+> 空工程耗时不能作为项目级基线，详见 [`Docs/Baseline.md`](Docs/Baseline.md)。
+
+---
+
+## 微信小游戏部署（云开发）
+
+使用**微信云开发**的静态网站托管 + 云存储承载游戏资源，通过 CloudBase CLI 一条命令上传整目录。
+
+### 一次性准备
+
+```powershell
+# 1. 放开当前用户 PowerShell 执行策略（npm 全局包需要）
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# 2. 用国内镜像安装 CloudBase CLI
+npm i -g @cloudbase/cli --registry=http://mirrors.cloud.tencent.com/npm/
+
+# 3. 登录（会打开浏览器授权）
+tcb login
+```
+
+> 详见踩坑记录 [P-007](Docs/Pitfalls.md#p-007)。
+
+### 上传前：排除调试符号
+
+```powershell
+$src = ".\minigame"
+$archive = ".\_symbols\$(Get-Date -Format yyyyMMdd)"
+New-Item -ItemType Directory -Path $archive -Force | Out-Null
+Get-ChildItem $src -Filter "*.symbols.unityweb" -Recurse |
+    Move-Item -Destination $archive -Force
+```
+
+删掉 `webgl.wasm.symbols.unityweb` 可让体积 **8.83 MB → 4.40 MB（-50%）**。符号文件按版本归档，线上崩溃时用来还原栈。详见 [P-008](Docs/Pitfalls.md#p-008)。
+
+### 一键上传
+
+```powershell
+tcb hosting deploy ./webgl webgl -e <环境ID>
+```
+
+| 参数 | 含义 |
+|---|---|
+| `./webgl` | 本地目录 |
+| `webgl` | 云端目标路径（静态托管的子目录） |
+| `-e <环境ID>` | 云开发环境 ID |
+
+### 常用命令
+
+```powershell
+tcb env:list                      # 查看环境与免费体验版
+tcb hosting:detail -e <环境ID>    # 查看静态托管域名与用量
+tcb hosting:delete webgl -e <环境ID>  # 删除云端目录
+```
 
 ---
 
@@ -222,6 +287,8 @@ curl http://127.0.0.1:11434/api/tags
 | [P-004](Docs/Pitfalls.md#p-004) | Ollama 模型已下载但 API 返回空列表 | 服务只在启动时读 `OLLAMA_MODELS`，改环境变量后必须彻底重启 |
 | [P-005](Docs/Pitfalls.md#p-005) | Ollama 推理报 `device kernel image is invalid` | NVIDIA 546.30 驱动低于 Ollama 0.40 内核要求，需升级驱动 |
 | [P-006](Docs/Pitfalls.md#p-006) | WebGL 部署白屏 | 产物是 `.gz`，服务器须返回 `Content-Encoding: gzip`，或构建时开 Decompression Fallback |
+| [P-007](Docs/Pitfalls.md#p-007) | npm 全局装 tcb 失败 | PowerShell 执行策略 + 国内镜像：`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` + `--registry` 临时指定 |
+| [P-008](Docs/Pitfalls.md#p-008) | 微信小游戏体积翻倍 | `webgl.wasm.symbols.unityweb` 调试符号占 4.43 MB，上传前排除，体积 -50% |
 
 ---
 

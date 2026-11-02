@@ -82,6 +82,21 @@ u3d-craft/
 
 ## 构建
 
+### 自动化构建
+
+`Assets/Editor/BuildScript.cs` 提供命令行一键出包：
+
+```powershell
+& $unity -quit -batchmode -nographics -projectPath $proj `
+         -executeMethod BuildScript.BuildAll -logFile "Logs\build-all.log"
+```
+
+可用方法：`BuildAndroid` / `BuildWebGL` / `BuildMiniGame` / `BuildAll`
+
+自动记录耗时到 `Builds/build-history.md`，并剥离调试符号（详见 [P-008](Docs/Pitfalls.md#p-008)、[P-012](Docs/Pitfalls.md#p-012)）。
+
+---
+
 ### 编辑器内构建
 
 菜单 `Tools/Build/` 下提供三端打包入口，构建产物输出到 `Build/Output/`（已被 `.gitignore` 排除）。
@@ -188,8 +203,8 @@ curl http://127.0.0.1:11434/api/tags
 - [x] **微信小游戏云端部署**（云开发静态托管 + CloudBase CLI）
 - [ ] 通用小游戏框架（事件总线 / 对象池 / 状态机）
 - [ ] Addressables 分组策略与远程加载
-- [ ] 命令行一键三端出包
-- [ ] GitHub Actions CI 自动构建
+- [x] 命令行一键三端出包（`Assets/Editor/BuildScript.cs`）
+- [ ] GitHub Actions CI 自动构建（脚本已支持 `-batchmode` + 非 0 退出码，待接入）
 - [ ] HybridCLR 热更新接入
 - [ ] 微信小游戏首包裁剪到 4MB 以内（已定位主要体积来源，见 P-008）
 - [ ] WebGL 产物开启 brotli 压缩（当前 wasm 14.79 MB 未压缩，见 P-009）
@@ -320,7 +335,8 @@ tcb hosting:delete webgl -e <环境ID>  # 删除云端目录
 | [P-007](Docs/Pitfalls.md#p-007) | npm 全局装 tcb 失败 | PowerShell 执行策略 + 国内镜像：`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` + `--registry` 临时指定 |
 | [P-008](Docs/Pitfalls.md#p-008) | 调试符号被打包 | webgl/ 与 minigame/ 各带 4.43 MB 符号文件，上传前排除：CDN -12.3%、微信 -50% |
 | [P-009](Docs/Pitfalls.md#p-009) | CDN 上 wasm 未压缩 | webgl.wasm 14.79 MB 原样下发，开启 brotli 后约 3.5 MB（压比 76%） |
-
+| [P-011](Docs/Pitfalls.md#p-011) | 微信插件强制 Compression=Disabled | 插件在转换阶段改写设置并自行 brotli 压缩；CDN 产物需在 CDN 侧开压缩 |
+| [P-012](Docs/Pitfalls.md#p-012) | 构建脚本产物路径找不到 | 自动发现不可靠；改为「显式配置 > 构建时路径 > 兜底探测」三层优先级 |
 ---
 
 ## 贡献与规范

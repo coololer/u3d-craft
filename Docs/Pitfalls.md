@@ -656,5 +656,100 @@ Player Settings → **Publishing Settings** → Compression Format：
 - CDN 下载量是**乘上用户数**的成本项：14.79 MB vs 3.49 MB，10 万次加载差 1.1 TB 流量。
 
 ---
+---
+
+<a id="p-011"></a>
+## P-011 微信插件强制 Compression Format=Disabled，压缩由插件完成
+
+**日期**：2026-11-02
+**环境**：Unity 2021.3.14f1 + WX-WASM-SDK-V2
+
+### 现象
+
+想通过 Unity 的 Player Settings → Publishing Settings → **Compression Format** 给 WebGL 产物开启 Brotli 压缩，但构建后发现设置被改回了 **Disabled**。
+
+### 根因
+
+微信小游戏插件在「生成 + 转换」阶段会**强制把 Compression Format 改写为 Disabled**，然后在转换环节用自带的 `brotli.exe` 对 wasm 做压缩。
+
+构建日志可以印证：
+
+```
+Build Finished, Result: Success
+[Converter] Starting to generate Brotlib file
+RunCmd .../brotli.exe --force --quality 11
+       --input  ".../webgl/Build/webgl.wasm"
+       --output ".../minigame/wasmcode/xxx.webgl.wasm.code.unityweb.wasm.br"
+```
+
+压缩质量参数是 `--quality 11`（brotli 最高档），压比约 **76%**（14.79 MB → 3.49 MB）。
+
+### 影响
+
+| 产物 | 谁负责压缩 | 结果 |
+|---|---|---|
+| `minigame/` | 微信插件 brotli | ✅ 已压缩 |
+| `webgl/`（上 CDN） | **无人压缩** | ❌ 原始 `.wasm` 14.79 MB |
+
+### 解决
+
+- **微信小游戏**：保持默认，不要手动改 Compression Format（改了也会被插件覆盖）
+- **WebGL 上 CDN**：压缩必须在 **CDN 侧**开启（Brotli / Gzip），Unity 侧改设置无效
+
+### 复盘
+
+- **插件的构建钩子会覆盖设置**，遇到"设置不生效"先看构建日志有没有改写记录。
+- 一个 Unity 工程同时出「小游戏」和「浏览器 WebGL」时，两者的压缩策略**分别管理**，不能当成同一件事。
+
+---
+
+<a id="p-012"></a>
+## P-012 构建脚本的产物路径：已知就不要猜
+
+**日期**：2026-11-02
+**环境**：自研 `BuildScript.cs` 多端出包工具
+
+### 现象
+
+脚本设计为「构建后自动发现产物目录」，依次尝试 `DST/webgl`、`Builds/WebGL`、逐层向上探测 `*/webgl`。实际操作中连续出错：
+
+| 场景 | 脚本行为 | 结果 |
+|---|---|---|
+| 插件导出到 `H5\1\webgl`，与工程根差 3 层 | 只向上探 2 层 | ❌ 找不到 |
+| 手动把输出改到 `H5\web` | 仍找名为 `webgl` 的目录 | ❌ 找到旧产物，符号清理在错误目录执行 |
+| 产物目录被插件覆盖 | 统计到旧路径 | ❌ 体积数据错误 |
+
+### 根因
+
+**构建时脚本自己就知道产物会写到哪里**（`BuildPlayerOptions.locationPathName`），但构建后却丢弃这个信息、改用猜测。**已知的信息不该再猜。**
+
+### 解决
+
+改为三层优先级：
+
+1. **显式配置**：顶部 `WebGLOutputDir` 常量（推荐日常使用）
+2. **构建时传入的路径**：先验证该路径确实有产物（`index.html` 存在）
+3. **仅在无产物时才自动发现**，并打印显眼警告
+
+```csharp
+private const string WebGLOutputDir = "";   // 留空用 Builds/WebGL
+
+// 构建后
+bool pathHasOutput = Directory.Exists(path) && File.Exists(Path.Combine(path, "index.html"));
+if (!pathHasOutput)
+{
+    Debug.LogWarning($"预期位置 {path} 未找到产物，自动发现到 {discovered}。" +
+                     "如果这不是你想要的，请在 WebGLOutputDir 中显式指定输出目录。");
+    actualPath = discovered;
+}
+```
+
+### 复盘
+
+- **自动发现是兜底，不是主路径**。能用配置确定的，就不要写探测逻辑。
+- 这个 bug 迭代了 5 个版本才稳定：路径硬编码 → 多路探测 → 读配置 → 分策略 → **显式优先**。每一版都是真实跑出问题才改的。
+- 对面试的价值：能讲清「我为什么最后选择显式配置而不是继续加强探测」，比说「我写了个构建脚本」有说服力。
+
+---
 
 *最后更新：2026-11-02*
